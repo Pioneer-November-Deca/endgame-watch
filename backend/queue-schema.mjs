@@ -12,6 +12,7 @@ export const queueSchema = [
   `ALTER TABLE q_member ADD COLUMN IF NOT EXISTS quiet_enabled BOOLEAN NOT NULL DEFAULT true`,
   `ALTER TABLE q_member ADD COLUMN IF NOT EXISTS quiet_start INTEGER NOT NULL DEFAULT 0`,
   `ALTER TABLE q_member ADD COLUMN IF NOT EXISTS quiet_end INTEGER NOT NULL DEFAULT 360`,
+  `CREATE TABLE IF NOT EXISTS q_presence (member_id UUID NOT NULL REFERENCES q_member(id),tab_id UUID NOT NULL,seen_at BIGINT NOT NULL,closed_at BIGINT,PRIMARY KEY(member_id,tab_id))`,
   `CREATE TABLE IF NOT EXISTS q_session (token_hash TEXT PRIMARY KEY, member_id UUID NOT NULL REFERENCES q_member(id), expires_at BIGINT NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS q_access (token_hash TEXT PRIMARY KEY, member_id UUID NOT NULL REFERENCES q_member(id), expires_at BIGINT NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS q_email_verify (token_hash TEXT PRIMARY KEY, member_id UUID NOT NULL REFERENCES q_member(id), email TEXT NOT NULL, expires_at BIGINT NOT NULL)`,

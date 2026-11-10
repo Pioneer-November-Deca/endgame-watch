@@ -28,7 +28,8 @@ export function createHandler({db,queue,mail=defaultMail,publicOrigin=process.en
     if(!await rate('join-ip:'+ip,5)||!await rate('join-global',1000))return json(res,429,{message:'Too many new queue entries. Please try again later.'});
     return json(res,201,await queue.join(data));
    }
-   if(req.method==='POST'&&url.pathname==='/api/queue/heartbeat'){await read(req);return json(res,200,await queue.heartbeat(token(req)));}
+   if(req.method==='POST'&&url.pathname==='/api/queue/heartbeat'){const data=await read(req);return json(res,200,await queue.heartbeat(token(req),data.tabId));}
+   if(req.method==='POST'&&url.pathname==='/api/queue/disconnect'){const data=await read(req);return json(res,200,await queue.disconnect(data.token,data.tabId));}
    if(req.method==='POST'&&url.pathname==='/api/queue/action'){const data=await read(req);return json(res,200,await queue.action(token(req),data.action,data));}
    // DEPRECATED: never collect addresses or send email, including with old provider settings.
    if(['/api/queue/email','/api/queue/verify-email','/api/queue/exchange','/api/subscribe','/confirm'].includes(url.pathname))return json(res,410,{message:'Email fallback has been deprecated. Use browser on-call alerts.'});
