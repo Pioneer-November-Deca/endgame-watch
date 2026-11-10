@@ -6,22 +6,18 @@ A browser-based on-call queue for the Satisfactory Gamefound campaign. Public al
 
 Use Node 22 or newer. Run npm ci, configure DATABASE_URL and PUBLIC_ORIGIN, then npm start. The static frontend is in docs; docs/config.js selects the API. Run npm test for source, database, queue and HTTP checks.
 
-## Browser alerts
+## Watching shifts
 
-The first ready participant is called below five minutes and has 15 seconds to acknowledge. Acknowledged duty has no fixed timeout. Browser sound and notifications require enabling them in the open tab. Acknowledgment silences the full-page red alarm. A source-confirmed reset clears the round and returns called participants to the back with a 30-minute cooldown. Nonresponders receive the same passive cooldown and remain in the queue. Explicitly choosing Go on call clears cooldown and makes them eligible again, even in the same round. Only confirmed completion or leaving ends participation.
+Join with a public alias, enable browser alerts and start watching. Up to five participants can watch simultaneously, enforced in one database transaction. Each shift lasts 30 minutes. Start requests are idempotent and cannot silently extend an active shift. Watchers sort ahead of waiting entries and everybody sees the current watcher count and remaining shift times.
 
-ON_CALL_TEST_MODE=true temporarily changes the election/alarm threshold to nine minutes. The page labels test mode and offers a local-development-only red-alarm utility; no public participant preview is shown. Set false to restore five minutes.
+New participants default to Not watching. Expiry, stop/pass, quiet hours or 45 seconds offline end a shift and return the participant to Not watching. A heartbeat never automatically restores a lost shift. Explicitly starting again takes an open spot immediately; there is no enforced cooldown.
 
-Quiet hours are editable in the participant’s time zone, including daylight-saving changes, and automatically exclude calls. Available participants return after quiet hours if they keep their page online. Browser sleep, closing the page and network interruptions can prevent alarms.
+All active watchers receive a private browser alarm below five minutes (nine when ON_CALL_TEST_MODE=true). A source-confirmed reset clears alarms while shifts continue. Marking an alarm seen silences it without ending a shift. Keep the page running; browser sleep and lost connectivity can prevent alarms.
 
-Joining automatically creates a bookmarkable hash route containing an alias and private session credential. The alias grants no access. Sessions are saved in the clearable endgame_watch_session cookie in this browser and expire after 30 days. Anyone with the private bookmark can control the entry; keep it private. Hash routing works on GitHub Pages without a server rewrite.
+Completion marks the entry permanently done and removes it from the queue. Leaving also removes it. Both revoke private sessions and return the SPA to the start. A named endgame_watch_session cookie remembers the session for up to 30 days; the URL has a private bookmark token. Leave queue and forget this session clears the cookie, legacy localStorage and URL. Keep bookmarks private.
 
-## Deprecated email
-
-Email is unsuitable for instant on-call alerts. Its UI and legacy delivery implementation are commented out, all email routes return 410, and the worker cannot dispatch mail even if old provider settings remain. Legacy database tables are retained to avoid destructive migrations.
+Email is deprecated: no signup, API sends or worker delivery. Legacy tables and commented provider code are retained. The public site has no preview button; a local-development-only utility supports testing.
 
 ## Hosting
 
-GitHub Actions publishes docs to GitHub Pages. Railway hosts the continuously polling API and PostgreSQL. The watcher reads Gamefound’s official public campaign endpoint every five seconds and fails closed on stale or invalid samples. API data can briefly lag an extension; Gamefound remains the source of truth.
-
-Completion permanently marks the entry done, revokes its sessions and returns the SPA to the starting view. Leaving removes the entry and revokes its private bookmarks, clears the named cookie and legacy localStorage, and clears the URL. Go off call only pauses availability.
+GitHub Pages serves docs; Railway hosts the API and PostgreSQL. The watcher polls Gamefound’s public campaign endpoint every five seconds and suppresses alarms for stale or invalid signals. Gamefound remains the source of truth.
