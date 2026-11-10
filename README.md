@@ -8,9 +8,9 @@ Use Node 22 or newer. Run npm ci, configure DATABASE_URL and PUBLIC_ORIGIN, then
 
 ## Watching shifts
 
-Join with a public alias, enable browser alerts and start watching. Up to five participants can watch simultaneously, enforced in one database transaction. Each shift lasts 30 minutes. Start requests are idempotent and cannot silently extend an active shift. Watchers sort ahead of waiting entries and everybody sees the current watcher count and remaining shift times.
+Join with a public alias, enable browser alerts and start watching. There is no watcher-count limit. Each shift lasts 30 minutes. Start requests are idempotent and cannot silently extend an active shift. Watchers sort ahead of waiting entries and everybody sees the current watcher count and remaining shift times.
 
-New participants default to Not watching. Expiry, stop/pass, quiet hours or 45 seconds offline end a shift and return the participant to Not watching. A heartbeat never automatically restores a lost shift. Explicitly starting again takes an open spot immediately; there is no enforced cooldown.
+New participants default to Not watching. Expiry, stop/pass or 45 seconds offline end a shift and return the participant to Not watching. A heartbeat never automatically restores a lost shift. Explicitly starting again starts a shift immediately; there is no enforced cooldown.
 
 Below five minutes (nine when ON_CALL_TEST_MODE=true), the first active watcher receives an alarm with ten seconds to respond. Snoozing or not responding returns that watcher to Not watching and cascades to the next active watcher. I’ll upgrade now grants a single buffer of up to thirty seconds, bounded by the shift and campaign deadline. The page stays red during the buffer. Without a clock reset, expiry returns the upgrader to Not watching and alerts the next watcher. A source-confirmed reset clears the cascade while remaining shifts continue. A server pulse evaluates deadlines every second and the browser refreshes every 1.5 seconds. New offers require a fresh Gamefound signal. Keep the page running; browser sleep and lost connectivity can prevent alarms.
 
@@ -21,3 +21,5 @@ Email is deprecated: no signup, API sends or worker delivery. Legacy tables and 
 ## Hosting
 
 GitHub Pages serves docs; Railway hosts the API and PostgreSQL. The watcher polls Gamefound’s public campaign endpoint every five seconds and suppresses alarms for stale or invalid signals. Gamefound remains the source of truth.
+
+Quiet hours and region selection are deprecated, commented out of the SPA and ignored by watcher eligibility. The preferences action returns 410. Public nextUp names the first watcher before the alarm and the selected upgrader during the cascade. All viewers see the low-clock red state; only the selected watcher receives sound/browser notifications and sees upgrade/snooze response controls. Everyone else sees the prominent Name — BUY NOW banner beside the clock and is asked to hold off. A missed turn is named publicly as the cascade moves forward. Only the selected watcher’s banner pulses, respecting reduced-motion preferences. Watchers return to blue on a confirmed source reset.
