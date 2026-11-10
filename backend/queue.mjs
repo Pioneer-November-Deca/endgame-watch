@@ -30,10 +30,13 @@ export function createQueue({db,now=Date.now,onCallSeconds=300}) {
   }
   async function heartbeat(token){const member=await requireMember(token,db);await db.query('UPDATE q_member SET last_seen_at=$1 WHERE id=$2',[now(),member.id]);return {ok:true};}
   async function action(token,action,data={}){return transaction(async c=>{
-    const member=await requireMember(token,c);if(member.state==='completed'&&action!=='leave')throw problem('Your one Endgame extension is marked complete. You are out of this campaign’s queue.');
+    const member=await requireMember(token,c);if(member.state==='completed')throw problem('Your one Endgame extension is marked complete. You are out of this campaign’s queue.');
     if(member.state==='left'&&action!=='rejoin')throw problem('You have left the queue. Rejoin explicitly to participate again.');
     const calls=await c.query("SELECT * FROM q_call WHERE member_id=$1 AND status IN ('offered','acknowledged') ORDER BY offered_at DESC LIMIT 1",[member.id]);const call=calls.rows[0];
-    if(action==='available')await c.query('UPDATE q_member SET available=$1,last_seen_at=$2,priority_order=CASE WHEN $1 THEN priority_order ELSE NULL END WHERE id=$3',[data.available===true,now(),member.id]);
+    if(action==='available'){
+      await c.query('UPDATE q_member SET available=$1,last_seen_at=$2,cooldown_until=CASE WHEN $1 THEN 0 ELSE cooldown_until END,priority_order=CASE WHEN $1 THEN priority_order ELSE NULL END WHERE id=$3',[data.available===true,now(),member.id]);
+      if(data.available===true&&!call)await c.query("DELETE FROM q_touch WHERE member_id=$1 AND round_id IN (SELECT id FROM q_round WHERE status='active')",[member.id]);
+    }
     else if(action==='priority'){
       if(!readyOnPage(member,now()))throw problem('You must be available, online and out of cooldown to volunteer first.');
       await c.query("UPDATE q_member SET priority_order=COALESCE(priority_order,nextval('q_order_seq')) WHERE id=$1",[member.id]);
@@ -48,10 +51,12 @@ export function createQueue({db,now=Date.now,onCallSeconds=300}) {
       await c.query("UPDATE q_member SET state='completed',available=false,email_consent=false,priority_order=NULL WHERE id=$1",[member.id]);
       await c.query('DELETE FROM q_email_verify WHERE member_id=$1',[member.id]);
       if(call)await c.query("UPDATE q_call SET status='completed',act_by=$1 WHERE id=$2",[now()+30_000,call.id]);
+      await c.query('DELETE FROM q_session WHERE member_id=$1',[member.id]);
     }else if(action==='leave'){
       await c.query("UPDATE q_member SET state='left',available=false,email=NULL,email_verified=false,email_consent=false,priority_order=NULL WHERE id=$1",[member.id]);
       await c.query('DELETE FROM q_email_verify WHERE member_id=$1',[member.id]);
       if(call)await c.query("UPDATE q_call SET status='passed' WHERE id=$1",[call.id]);
+      await c.query('DELETE FROM q_session WHERE member_id=$1',[member.id]);
     }else if(action==='rejoin')await c.query("UPDATE q_member SET state='active',available=false,queue_order=nextval('q_order_seq'),last_seen_at=$1 WHERE id=$2",[now(),member.id]);
     else if(action==='preferences'){
       if(!validPreferences(data.region,data.timezone))throw problem('Choose a listed region and time zone.');
@@ -75,16 +80,16 @@ export function createQueue({db,now=Date.now,onCallSeconds=300}) {
     let call=(await c.query("SELECT * FROM q_call WHERE round_id=$1 AND status IN ('offered','acknowledged') ORDER BY offered_at DESC LIMIT 1",[round.id])).rows[0];
     if(call){
       const member=(await c.query('SELECT * FROM q_member WHERE id=$1',[call.member_id])).rows[0];
-      const expired=!readyOnPage(member,now())||(call.status==='offered'&&Number(call.respond_by)<=now())||(call.act_by!=null&&Number(call.act_by)<=now());
+      const expired=!readyOnPage(member,now())||(call.status==='offered'&&Number(call.respond_by)<=now());
       if(expired){await c.query("UPDATE q_call SET status='expired' WHERE id=$1",[call.id]);await moveBack(c,member.id);call=null;}
-      else if(call.status==='acknowledged'&&observation.seconds<120&&call.act_by==null){call.act_by=Math.min(now()+60_000,observation.deadlineAt-1000);await c.query('UPDATE q_call SET act_by=$1 WHERE id=$2',[call.act_by,call.id]);}
+      // Acknowledged duty has no fixed timeout; explicit actions or reset end it.
     }
     const all=(await c.query("SELECT * FROM q_member WHERE state='active'")).rows.sort((a,b)=>compareQueue(a,b,now()));
     const touched=new Set((await c.query('SELECT member_id FROM q_touch WHERE round_id=$1',[round.id])).rows.map(x=>x.member_id));
     const recentCompletion=(await c.query("SELECT 1 FROM q_call WHERE round_id=$1 AND status='completed' AND act_by>$2 LIMIT 1",[round.id,now()])).rows.length>0;
     if(!call&&!recentCompletion){
       const next=all.find(m=>readyOnPage(m,now())&&!touched.has(m.id));
-      if(next){call={id:randomUUID(),member_id:next.id,status:'offered',respond_by:now()+15_000};await c.query('INSERT INTO q_call(id,round_id,member_id,offered_at,respond_by) VALUES($1,$2,$3,$4,$5)',[call.id,round.id,next.id,now(),call.respond_by]);await c.query("INSERT INTO q_touch(round_id,member_id,channel) VALUES($1,$2,'page') ON CONFLICT DO NOTHING",[round.id,next.id]);await c.query('UPDATE q_member SET priority_order=NULL WHERE id=$1',[next.id]);touched.add(next.id);}
+      if(next){call={id:randomUUID(),member_id:next.id,status:'offered',respond_by:now()+15_000};await c.query('INSERT INTO q_call(id,round_id,member_id,offered_at,respond_by) VALUES($1,$2,$3,$4,$5) ON CONFLICT(round_id,member_id) DO UPDATE SET id=EXCLUDED.id,status=\'offered\',offered_at=EXCLUDED.offered_at,respond_by=EXCLUDED.respond_by,act_by=NULL',[call.id,round.id,next.id,now(),call.respond_by]);await c.query("INSERT INTO q_touch(round_id,member_id,channel) VALUES($1,$2,'page') ON CONFLICT DO NOTHING",[round.id,next.id]);await c.query('UPDATE q_member SET priority_order=NULL WHERE id=$1',[next.id]);touched.add(next.id);}
     }
     return [];
     /* DEPRECATED: email is unsuitable for instant on-call alerts. Retained for reference only.
