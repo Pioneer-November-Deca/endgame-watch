@@ -1,70 +1,41 @@
-(() => {
-  'use strict';
-  const $ = id => document.getElementById(id);
-  const raw = window.ENDGAME_CONFIG?.apiBaseUrl || '';
-  let base = '';
-  try {
-    const url = new URL(raw);
-    if (url.protocol === 'https:' || (url.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(url.hostname))) base = url.origin;
-  } catch { /* An unconfigured deployment is displayed explicitly. */ }
-  let observation = null, receivedAt = 0, allowedSignup = false, submitting = false;
-  function unavailable(message) {
-    observation = null; allowedSignup = false; $('subscribe').disabled = true;
-    $('subscribe').textContent = 'Signup temporarily unavailable';
-    $('signal-badge').textContent = 'NO LIVE SIGNAL'; $('clock').textContent = '— — : — —';
-    $('signal-status').textContent = '● ' + message;
-  }
-  function draw() {
-    if (!observation || observation.sourceStatus !== 'live' || performance.now() - receivedAt > 8000) {
-      $('clock').textContent = '— — : — —';
-      $('signal-badge').textContent = 'NO LIVE SIGNAL';
-      $('clock-caption').textContent = 'A fresh Gamefound observation is unavailable';
-      return;
-    }
-    const age = Math.max(0, observation.serverTime - observation.observedAt) + performance.now() - receivedAt;
-    if (age > (observation.freshnessMs || 15000)) { $('clock').textContent = '— — : — —'; $('signal-badge').textContent = 'STALE SIGNAL'; return; }
-    const seconds = observation.deadlineAt == null ? Math.max(0, observation.seconds - Math.floor(age / 1000))
-      : Math.max(0, Math.ceil((observation.deadlineAt - observation.serverTime - (performance.now() - receivedAt)) / 1000));
-    $('clock').textContent = `${String(Math.floor(seconds / 3600)).padStart(2,'0')}:${String(Math.floor(seconds % 3600 / 60)).padStart(2,'0')}:${String(seconds % 60).padStart(2,'0')}`;
-    $('signal-badge').textContent = 'LIVE SIGNAL';
-    $('clock-caption').textContent = 'HOURS / MINUTES / SECONDS';
-    // Display interpolation never triggers email. Only server observations do.
-  }
-  async function refresh() {
-    try {
-      const response = await fetch(base + '/api/status', { cache: 'no-store', signal: AbortSignal.timeout(7000) });
-      if (!response.ok) throw new Error('unavailable');
-      const data = await response.json();
-      observation = data; receivedAt = performance.now();
-      allowedSignup = data.signupEnabled === true;
-      $('subscribe').disabled = !allowedSignup || submitting;
-      if (!submitting) $('subscribe').textContent = allowedSignup ? 'Get my near-end alert →' : 'Email signup coming soon';
-      $('signal-status').textContent = data.sourceStatus === 'live' ? '● Synced with Gamefound’s public API' : data.sourceStatus === 'elapsed' ? '● Latest reported deadline has passed; no near-end alert will trigger' : '● Gamefound timer is unavailable; no alert will trigger';
-      $('last-observation').textContent = data.observedAt ? 'Last watcher check: ' + new Date(data.observedAt).toLocaleTimeString() : 'No timer observation yet.';
-      const delivery = { accepted: 'Mailgun accepted the near-end alert. Inbox delivery is not guaranteed.', rejected: 'Mailgun rejected the alert. Delivery needs attention.', 'delivery-unknown': 'Alert delivery is uncertain. The operator must check Mailgun logs.', sending: 'The near-end alert is being submitted.', 'skipped-expired': 'The alert observation expired before sending. No late alert was sent.' };
-      $('delivery-status').textContent = delivery[data.alertStatus] || (data.alertsEnabled ? 'Near-end alerts are enabled. One alert per campaign.' : 'Alert delivery is not enabled yet.');
-      if (!$('form-status').dataset.submitted) $('form-status').textContent = allowedSignup ? 'Confirm your email to join the campaign alert list.' : 'Mailgun signup is not enabled yet. No address is collected.';
-      draw();
-    } catch { unavailable('Backend is unavailable. Check Gamefound directly.'); }
-    finally { setTimeout(refresh, 3000); }
-  }
-  $('signup').addEventListener('submit', async event => {
-    event.preventDefault(); if (!allowedSignup || submitting) return;
-    submitting = true; $('subscribe').disabled = true; $('subscribe').textContent = 'Sending confirmation…';
-    $('form-status').dataset.submitted = 'true';
-    try {
-      const response = await fetch(base + '/api/subscribe', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: $('email').value, consent: $('consent').checked, website: $('website').value }), signal: AbortSignal.timeout(20000) });
-      const data = await response.json(); $('form-status').textContent = data.message;
-      if (response.ok) $('signup').reset();
-    } catch { $('form-status').textContent = 'Could not confirm submission. Check your inbox before trying again.'; }
-    finally { submitting = false; $('subscribe').disabled = !allowedSignup; $('subscribe').textContent = 'Get my near-end alert →'; }
-  });
-  if (!base) {
-    unavailable('Railway backend URL has not been configured yet.');
-    $('form-status').textContent = 'Email signup will open after the backend is connected.';
-    $('delivery-status').textContent = 'This deployment is awaiting its Railway backend.';
-    $('subscribe').textContent = 'Email signup coming soon';
-  } else refresh();
-  setInterval(draw, 250);
-})();
+import {REGIONS} from './regions.js';
+const $=id=>document.getElementById(id),storageKey='endgame-queue-session-v1';
+let base='',session='',state=null,signal=null,receivedAt=0,signalReceivedAt=0,busy=false,loadedPrefs='',audio=null,alertsOn=false,lastAlert='';
+try{const url=new URL(window.ENDGAME_CONFIG?.apiBaseUrl||'');if(url.protocol==='https:'||(url.protocol==='http:'&&['localhost','127.0.0.1'].includes(url.hostname)))base=url.origin;}catch{}
+try{session=localStorage.getItem(storageKey)||'';}catch{}
+const now=()=>state?state.serverTime+(performance.now()-receivedAt):Date.now();
+const setMessage=(id,text)=>{$(id).textContent=text;};
+function keepToken(token){session=token;try{localStorage.setItem(storageKey,token);}catch{}loadedPrefs='';}
+async function api(path,data,withSession=true){const headers={};if(withSession&&session)headers.Authorization='Bearer '+session;if(data!==undefined)headers['Content-Type']='application/json';const r=await fetch(base+path,{method:data===undefined?'GET':'POST',headers,body:data===undefined?undefined:JSON.stringify(data),cache:'no-store',signal:AbortSignal.timeout(20000)});let out;try{out=await r.json();}catch{throw new Error('The server returned an unreadable response.');}if(!r.ok)throw new Error(out.message||'The request could not be completed.');return out;}
+function populateRegions(regionId,zoneId){const region=$(regionId),zone=$(zoneId);region.replaceChildren();for(const r of REGIONS){const o=document.createElement('option');o.value=r.id;o.textContent=r.label;region.append(o);}const fill=(preferred)=>{zone.replaceChildren();const group=REGIONS.find(r=>r.id===region.value);for(const name of group.zones){const o=document.createElement('option');o.value=name;o.textContent=name.replaceAll('_',' ').replace('/',' / ');zone.append(o);}if(group.zones.includes(preferred))zone.value=preferred;};region.addEventListener('change',()=>fill());fill();return fill;}
+const fillJoin=populateRegions('join-region','join-zone'),fillMine=populateRegions('my-region','my-zone');
+try{const tz=Intl.DateTimeFormat().resolvedOptions().timeZone,region=REGIONS.find(r=>r.zones.includes(tz));if(region){$('join-region').value=region.id;fillJoin(tz);}}catch{}
+function duration(ms){const secs=Math.max(0,Math.ceil(ms/1000));return secs>=60?Math.ceil(secs/60)+' min':secs+' sec';}
+function drawClock(){if(!signal||signal.sourceStatus!=='live'||performance.now()-signalReceivedAt>10000||signal.serverTime-signal.observedAt+(performance.now()-signalReceivedAt)>(signal.freshnessMs||15000)){$('clock').textContent='— — : — —';$('signal-badge').textContent='NO LIVE SIGNAL';return;}const s=Math.max(0,Math.ceil((signal.deadlineAt-signal.serverTime-(performance.now()-signalReceivedAt))/1000));$('clock').textContent=[Math.floor(s/3600),Math.floor(s%3600/60),s%60].map(n=>String(n).padStart(2,'0')).join(':');$('signal-badge').textContent='LIVE SIGNAL';$('clock-caption').textContent='HOURS / MINUTES / SECONDS';}
+function statusFor(row){if(row.onCall)return state.call?.status==='acknowledged'?(state.call.actBy?'Acting now':'Acknowledged · standing by'):'On call · awaiting acknowledgment';if(row.cooldownUntil>now())return 'Cooldown · '+duration(row.cooldownUntil-now());if(row.ready)return row.volunteered?'Ready · volunteered first':'Ready now';if(row.available)return 'Available · page offline';return 'Not available';}
+function updateTimers(){drawClock();if(!state)return;const me=state.me,row=state.rows.find(r=>r.id===me?.id);if(row)$('my-status').textContent=statusFor(row);const call=state.call;if(me&&call?.memberId===me.id){$('my-call-copy').textContent=call.status==='offered'?'Acknowledge within '+duration(call.respondBy-now())+'. You can pass instead.':call.actBy?'Action window: '+duration(call.actBy-now())+'. Check Gamefound before acting.':'You’re on call. Stand by and watch the live timer. Your action window starts below two minutes.';}}
+function notifyMyTurn(){const me=state?.me,call=state?.call;if(!alertsOn||!me||call?.memberId!==me.id||lastAlert===call.id+(call.actBy?':critical':':call')||signal?.sourceStatus!=='live')return;lastAlert=call.id+(call.actBy?':critical':':call');try{if(audio){const oscillator=audio.createOscillator(),gain=audio.createGain();oscillator.connect(gain);gain.connect(audio.destination);gain.gain.value=.15;oscillator.frequency.value=660;oscillator.start();oscillator.stop(audio.currentTime+.35);}if('Notification'in window&&Notification.permission==='granted'){const n=new Notification(call.actBy?'Endgame Watch: red flag — action needed':'Endgame Watch: you’re on call',{body:'Open your private queue and acknowledge your turn.',tag:'endgame-turn'});n.onclick=()=>{window.focus();$('my-card').scrollIntoView({behavior:'smooth'});};}}catch{}}
+function render(){if(!state)return;const me=state.me,active=me?.state==='active',row=state.rows.find(r=>r.id===me?.id),call=state.call,isMine=call?.memberId===me?.id;
+ $('join-card').hidden=!!me;$('my-card').hidden=!me;$('preferences-panel').hidden=!active;$('participation-actions').hidden=!active;
+ $('join-button').disabled=busy||!base;$('join-button').textContent='Join the live queue →';
+ if(me){$('my-alias').textContent=me.alias;$('my-position').textContent=row?'Your current ticket is #'+row.position+' of '+state.total:'You are '+(me.state==='completed'?'marked complete for this campaign.':'out of the queue.');$('my-status').textContent=row?statusFor(row):me.state==='completed'?'Thank you. Your one Endgame extension is marked used.':'You left the queue and disabled fallback emails.';$('my-call').hidden=!isMine;$('my-call-title').textContent=isMine?(call.status==='offered'?'Your turn — acknowledge now':call.actBy?'Red flag — your action window':'You’re on call — stand by'):'';$('ack-button').hidden=!isMine||call.status!=='offered';$('ack-button').disabled=busy||signal?.sourceStatus!=='live'||(call?.respondBy??0)<=now();$('available-button').textContent=me.available?'I’m not available now':'I’m available now';$('priority-button').disabled=busy||!row?.ready||isMine;$('pass-button').disabled=busy;$('available-button').disabled=busy;$('complete-button').disabled=busy;$('find-me').disabled=!row;$('leave-button').hidden=me.state!=='active';$('rejoin-button').hidden=me.state!=='left';if(me.state==='left'){$('my-message').textContent='Your private session is saved. Rejoin explicitly if you want to participate again.';}const key=me.region+'|'+me.timezone;if(loadedPrefs!==key){$('my-region').value=me.region;fillMine(me.timezone);loadedPrefs=key;}
+ $('email-button').disabled=busy||!signal?.signupEnabled;$('email').disabled=!signal?.signupEnabled;$('email-consent').disabled=!signal?.signupEnabled;$('email-button').textContent=signal?.signupEnabled?'Verify fallback email':'Fallback email not configured';$('email-off').hidden=!me.emailOptIn;$('email-off').disabled=busy;if(!signal?.signupEnabled&&!$('email-message').dataset.submitted)$('email-message').textContent='No address is collected until Mailgun is configured. Your web queue is already active.';else if(me.emailVerified&&me.emailOptIn&&!$('email-message').dataset.submitted)$('email-message').textContent='Fallback email is verified and enabled for 6 a.m.–midnight in your selected zone.';else if(me.emailVerified&&!me.emailOptIn&&!$('email-message').dataset.submitted)$('email-message').textContent='Fallback email is off. Verify your address again if you choose to opt back in.';
+ }
+ $('queue-total').textContent=state.total;$('queue-empty').hidden=state.total>0;$('queue-table').hidden=state.total===0;const ready=state.rows.filter(r=>r.ready).length;$('queue-summary').textContent=ready+' ready now · updates automatically';
+ const rows=document.createDocumentFragment();for(const item of state.rows){const tr=document.createElement('tr');if(item.id===me?.id){tr.className='is-me';tr.id='my-queue-row';}else if(item.onCall)tr.className='is-oncall';const ticket=document.createElement('td');ticket.className='ticket';ticket.textContent=String(item.position).padStart(2,'0');const alias=document.createElement('td');const name=document.createElement('strong');name.textContent=item.alias;alias.append(name);if(item.id===me?.id){const badge=document.createElement('span');badge.className='you-badge';badge.textContent='YOU';alias.append(badge);const find=document.createElement('button');find.type='button';find.className='row-action';find.textContent='My controls ↑';find.addEventListener('click',()=>$('my-card').scrollIntoView({behavior:'smooth'}));alias.append(find);}const status=document.createElement('td');status.textContent=statusFor(item);tr.append(ticket,alias,status);rows.append(tr);}$('queue-rows').replaceChildren(rows);
+ let banner='The next on-call round starts below five minutes.';if(signal?.sourceStatus!=='live')banner='Campaign signal unavailable. New on-call elections and fallback emails are paused.';else if(call){const who=state.rows.find(r=>r.id===call.memberId)?.alias||'A volunteer';banner=who+(call.status==='acknowledged'?' has acknowledged the call.':' is being called.');}else if(state.round)banner='On-call round open. Waiting for an available person.';if(state.round?.fallbackSent)banner+=' A critical fallback wave has been reserved for this round.';$('round-banner').textContent=banner;
+ $('budget-status').textContent=(signal?.alertsEnabled?'Fallback enabled. ':'Fallback sending is disabled until configured. ')+'Rolling 24-hour app budget: '+state.mailBudget.totalUsed+'/'+state.mailBudget.totalCap+' total emails reserved; '+state.mailBudget.fallbackUsed+'/'+state.mailBudget.fallbackCap+' fallback emails. Reservations count conservatively even if delivery is uncertain.';
+ notifyMyTurn();updateTimers();
+}
+async function refresh(){if(!base)return;try{const [s,q]=await Promise.all([api('/api/status',undefined,false),api('/api/queue')]);signal=s;state=q;receivedAt=performance.now();signalReceivedAt=receivedAt;$('signal-status').textContent=s.sourceStatus==='live'?(s.source==='local-qa'?'● Local test signal':'● Synced with Gamefound’s public API'):s.sourceStatus==='elapsed'?'● Latest reported deadline has passed':'● Live campaign signal unavailable';$('last-observation').textContent=s.observedAt?'Last source check: '+new Date(s.observedAt).toLocaleTimeString():'No observation yet.';render();}catch(error){$('queue-summary').textContent='Queue connection lost. Reconnecting…';$('signal-status').textContent='● '+error.message;signal=null;drawClock();}finally{setTimeout(refresh,3000);}}
+async function act(action,extra={}){if(busy)return;busy=true;render();try{await api('/api/queue/action',{action,...extra});setMessage('my-message',action==='complete'?'You’re marked complete and will not receive more calls.':action==='pass'?'Moved to the back with a 30-minute cooldown.':'Updated.');state=await api('/api/queue');receivedAt=performance.now();}catch(error){setMessage('my-message',error.message);}finally{busy=false;render();}}
+$('join-form').addEventListener('submit',async event=>{event.preventDefault();if(busy)return;busy=true;$('join-button').disabled=true;try{const joined=await api('/api/queue/join',{alias:$('alias').value,region:$('join-region').value,timezone:$('join-zone').value,consent:$('join-consent').checked,website:$('website').value},false);keepToken(joined.token);state=await api('/api/queue');receivedAt=performance.now();setMessage('my-message',joined.message);await api('/api/queue/heartbeat',{});}catch(error){setMessage('join-message',error.message);}finally{busy=false;render();$('join-button').disabled=false;}});
+$('available-button').onclick=()=>act('available',{available:!state.me.available});$('priority-button').onclick=()=>act('priority');$('ack-button').onclick=()=>act('ack');$('pass-button').onclick=()=>act('pass');$('complete-button').onclick=()=>{if(confirm('Confirm you have used your one Endgame extension. This removes you from this campaign’s queue and stops fallback emails.'))act('complete');};$('leave-button').onclick=()=>{if(confirm('Leave the queue and stop all fallback email alerts?'))act('leave');};$('email-off').onclick=()=>act('email-off');$('rejoin-button').onclick=()=>act('rejoin');$('find-me').onclick=()=>document.getElementById('my-queue-row')?.scrollIntoView({behavior:'smooth',block:'center'});
+$('preferences-form').addEventListener('submit',async e=>{e.preventDefault();await act('preferences',{region:$('my-region').value,timezone:$('my-zone').value});});
+$('email-form').addEventListener('submit',async e=>{e.preventDefault();if(!$('email').value||!$('email-consent').checked){setMessage('email-message','Enter your email and agree to fallback alerts.');return;}if(busy)return;busy=true;$('email-message').dataset.submitted='true';render();try{const r=await api('/api/queue/email',{email:$('email').value,consent:true});setMessage('email-message',r.message);$('email-form').reset();}catch(error){setMessage('email-message',error.message);}finally{busy=false;render();}});
+$('save-link').onclick=async()=>{try{const url=new URL(location.href);url.hash='session='+session;await navigator.clipboard.writeText(url.href);setMessage('my-message','Private access link copied. Save it securely; do not share it.');}catch{setMessage('my-message','Clipboard is unavailable. Keep this browser’s site data to retain your private session.');}};
+$('page-alerts').onclick=async()=>{try{const Context=window.AudioContext||window.webkitAudioContext;if(Context){audio=new Context();await audio.resume();}if('Notification'in window&&Notification.permission==='default')await Notification.requestPermission();alertsOn=true;$('page-alerts').textContent='Page alerts enabled';setMessage('my-message','Page alerts enabled for this tab. Keep the page running.');}catch{setMessage('my-message','This browser could not enable notifications. Watch the page directly.');}};
+const fragment=new URLSearchParams(location.hash.slice(1));const accessType=['verify','access','session'].find(key=>fragment.has(key));const accessToken=accessType?fragment.get(accessType):null;
+if(accessType){history.replaceState(null,'',location.pathname+location.search);$('access-panel').hidden=false;$('access-copy').textContent=accessType==='verify'?'Confirm that this email may receive repeated critical fallback alerts during your chosen awake hours.':'This private link controls your queue entry. Open it only if it is yours.';$('access-button').textContent=accessType==='verify'?'Confirm my fallback email':'Open my private controls';$('access-button').onclick=async()=>{try{if(accessType==='session'){const check=await fetch(base+'/api/queue',{headers:{Authorization:'Bearer '+accessToken}});const data=await check.json();if(!data.me)throw new Error('That private session has expired.');keepToken(accessToken);}else{const r=await api(accessType==='verify'?'/api/queue/verify-email':'/api/queue/exchange',{token:accessToken},false);keepToken(r.token);}state=await api('/api/queue');receivedAt=performance.now();$('access-panel').hidden=true;render();$('my-card').scrollIntoView({behavior:'smooth'});}catch(error){setMessage('access-message',error.message);}};}
+setInterval(()=>{if(session&&state?.me?.state==='active')api('/api/queue/heartbeat',{}).catch(()=>{});},10000);setInterval(updateTimers,500);
+if(base)refresh();else{$('join-button').textContent='Queue backend not configured';$('queue-summary').textContent='The backend URL is missing.';}

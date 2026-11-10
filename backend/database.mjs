@@ -1,8 +1,9 @@
 import pg from 'pg';
+import { queueSchema } from './queue-schema.mjs';
 export const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 5, connectionTimeoutMillis: 10_000, idleTimeoutMillis: 30_000 });
 pool.on('error', () => console.error('database_connection_error'));
-export async function migrate() {
-  const client = await pool.connect();
+export async function migrate(database = pool) {
+  const client = await database.connect();
   try {
     await client.query('BEGIN');
     await client.query('SELECT pg_advisory_xact_lock(74120911)');
@@ -24,6 +25,7 @@ export async function migrate() {
     await client.query(`CREATE TABLE IF NOT EXISTS watch_rate (
       key_hash TEXT PRIMARY KEY, hits INTEGER NOT NULL DEFAULT 1, expires_at TIMESTAMPTZ NOT NULL
     )`);
+    for (const statement of queueSchema) await client.query(statement);
     await client.query('COMMIT');
   } catch (error) { await client.query('ROLLBACK'); throw error; }
   finally { client.release(); }

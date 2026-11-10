@@ -1,8 +1,7 @@
 import { pool } from './database.mjs';
-import { CAMPAIGN_ID, shouldAlert } from './domain.mjs';
+import { CAMPAIGN_ID } from './domain.mjs';
 import { fetchCampaign, SourceError } from './gamefound-api.mjs';
-import { considerAlert } from './alerts.mjs';
-import { alertReady } from './mailgun.mjs';
+import { processQueue } from './alerts.mjs';
 import { setTimeout as delay } from 'node:timers/promises';
 let stopped = false;
 const shutdown = new AbortController();
@@ -32,16 +31,7 @@ export async function runWatcher() {
           let observation = await fetchCampaign({ signal: shutdown.signal });
           if (lostLock || stopped) break;
           await persist(client,observation);
-          // A second read protects against an extension between the polling sample
-          // and the alert. Never trigger solely from local countdown interpolation.
-          if (alertReady() && shouldAlert(observation)) {
-            await sleep(1000);
-            if (lostLock || stopped) break;
-            observation = await fetchCampaign({ signal: shutdown.signal });
-            if (lostLock || stopped) break;
-            await persist(client,observation);
-            if (shouldAlert(observation)) await considerAlert(observation);
-          }
+          await processQueue(observation);
           if (observation.campaignEndDate !== previousDeadline || previousStatus !== observation.sourceStatus) {
             console.log(JSON.stringify({ event:'gamefound_api_observation', status:observation.sourceStatus, seconds:observation.seconds,
               campaignEndDate:observation.campaignEndDate, deadlineChanged:previousDeadline !== null && previousDeadline !== observation.campaignEndDate }));
