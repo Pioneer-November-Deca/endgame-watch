@@ -1,7 +1,7 @@
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 const types = { html: 'text/html', js: 'text/javascript', css: 'text/css', json: 'application/json' };
-const allowed = new Set(['index.html','app.js','styles.css','config.js','regions.js','alarm-audio.js']);
+const allowed = new Set(['index.html','app.js','styles.css','config.js','regions.js','alarm-audio.js','alarm-policy.js']);
 http.createServer(async(req,res)=>{
   const name = new URL(req.url,'http://localhost').pathname.split('/').pop() || 'index.html';
   if (!allowed.has(name)) { res.writeHead(404);res.end();return; }
