@@ -15,3 +15,16 @@ export function createAlarmSound(){
  }
  return {sync,stop};
 }
+// A quiet, one-off readiness cue, distinct from the repeating turn alarm.
+export function createAttentionCue(){
+ let played=null;const tones=new Set();
+ function stop(){for(const tone of tones){try{tone.stop();}catch{}try{tone.disconnect();}catch{}}tones.clear();}
+ function sync(audio,{key,enabled,suppressed=false}){
+  if(!key){stop();played=null;return;}
+  if(suppressed){stop();played=key;return;}
+  if(!enabled||!audio||audio.state!=='running'){stop();return;}
+  if(played===key)return;stop();played=key;
+  for(const [offset,frequency] of [[0,330],[.19,390],[.4,620]]){const at=audio.currentTime+offset,tone=audio.createOscillator(),gain=audio.createGain();tone.type='sine';tone.frequency.value=frequency;gain.gain.setValueAtTime(0,at);gain.gain.linearRampToValueAtTime(.055,at+.025);gain.gain.linearRampToValueAtTime(0,at+.15);tone.connect(gain);gain.connect(audio.destination);tones.add(tone);tone.onended=()=>{tones.delete(tone);tone.disconnect();gain.disconnect();};tone.start(at);tone.stop(at+.15);}
+ }
+ return {sync,stop};
+}
