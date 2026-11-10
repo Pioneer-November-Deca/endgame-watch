@@ -1,3 +1,7 @@
+// DEPRECATED: email is not an instant on-call notification channel. No outbound delivery is enabled.
+export const signupReady=()=>false;
+export const alertReady=()=>false;
+/* Legacy implementation retained for reference; intentionally disabled.
 import { CAMPAIGN_URL } from './domain.mjs';
 export function mailConfig(){const e=process.env;return {key:e.MAILGUN_API_KEY,domain:e.MAILGUN_DOMAIN,from:e.MAILGUN_FROM,base:e.MAILGUN_REGION==='EU'?'https://api.eu.mailgun.net':'https://api.mailgun.net'};}
 export function mailReady(){const c=mailConfig();return Boolean(c.key&&c.domain&&c.from);}
@@ -11,3 +15,5 @@ export async function requestMailgun(path,fields){
 }
 export async function sendConfirmation(email,url){const c=mailConfig();return requestMailgun('/v3/'+encodeURIComponent(c.domain)+'/messages',{from:c.from,to:email,subject:'Verify your Endgame Watch fallback email',text:'Confirm that this address may receive occasional critical fallback alerts for Satisfactory. Your web queue works without email.\n\n'+url+'\n\nThis link expires in 30 minutes. If you did not request this, ignore this message.','o:tracking':'no'});}
 export async function sendFallback(email,seconds,url){const c=mailConfig();return requestMailgun('/v3/'+encodeURIComponent(c.domain)+'/messages',{from:c.from,to:email,subject:'Endgame Watch: help needed below 2 minutes',text:'The reported Gamefound countdown was '+seconds+' seconds remaining, and nobody had acknowledged the on-call role.\n\nOpen your private queue to volunteer, pass, mark your one extension complete, or stop alerts:\n'+url+'\n\nCampaign:\n'+CAMPAIGN_URL+'\n\nThe timer may already have reset by the time this arrives. Check the live page before acting. Email delivery is not guaranteed.','o:tag':'endgame-critical-fallback','o:tracking':'no'});}
+
+*/

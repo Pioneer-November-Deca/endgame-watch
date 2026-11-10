@@ -7,6 +7,9 @@ export const queueSchema = [
     queue_order BIGINT NOT NULL DEFAULT nextval('q_order_seq'), priority_order BIGINT,
     email TEXT UNIQUE, email_verified BOOLEAN NOT NULL DEFAULT false, email_consent BOOLEAN NOT NULL DEFAULT false
   )`,
+  `ALTER TABLE q_member ADD COLUMN IF NOT EXISTS quiet_enabled BOOLEAN NOT NULL DEFAULT true`,
+  `ALTER TABLE q_member ADD COLUMN IF NOT EXISTS quiet_start INTEGER NOT NULL DEFAULT 0`,
+  `ALTER TABLE q_member ADD COLUMN IF NOT EXISTS quiet_end INTEGER NOT NULL DEFAULT 360`,
   `CREATE TABLE IF NOT EXISTS q_session (token_hash TEXT PRIMARY KEY, member_id UUID NOT NULL REFERENCES q_member(id), expires_at BIGINT NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS q_access (token_hash TEXT PRIMARY KEY, member_id UUID NOT NULL REFERENCES q_member(id), expires_at BIGINT NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS q_email_verify (token_hash TEXT PRIMARY KEY, member_id UUID NOT NULL REFERENCES q_member(id), email TEXT NOT NULL, expires_at BIGINT NOT NULL)`,

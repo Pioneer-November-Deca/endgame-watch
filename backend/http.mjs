@@ -19,9 +19,9 @@ export function createHandler({db,queue,mail=defaultMail,publicOrigin=process.en
    if(req.method==='GET'&&url.pathname==='/healthz'){await db.query('SELECT 1');return json(res,200,{status:'ok'});}
    if(req.method==='GET'&&url.pathname==='/api/status'){
     const row=(await db.query('SELECT * FROM watch_observation WHERE campaign_id=$1',[CAMPAIGN_ID])).rows[0];
-    return json(res,200,{...publicObservation(row),campaignUrl:CAMPAIGN_URL,thresholdSeconds:120,onCallSeconds:300,signupEnabled:mail.signupReady(),alertsEnabled:mail.alertReady(),queueEnabled:true,regions:REGIONS});
+    return json(res,200,{...publicObservation(row),campaignUrl:CAMPAIGN_URL,thresholdSeconds:120,onCallSeconds:queue.onCallSeconds,testMode:queue.onCallSeconds===540,emailDeprecated:true,queueEnabled:true,regions:REGIONS});
    }
-   if(req.method==='GET'&&url.pathname==='/api/queue')return json(res,200,await queue.snapshot(token(req)));
+   if(req.method==='GET'&&url.pathname==='/api/queue'){const {mailBudget,...view}=await queue.snapshot(token(req));return json(res,200,view);}
    if(req.method==='POST'&&url.pathname==='/api/queue/join'){
     const data=await read(req);if(data.website||data.consent!==true)return json(res,400,{message:'Confirm your eligibility and agreement to join the public alias queue.'});
     const ip=(req.headers['x-forwarded-for']||req.socket.remoteAddress||'unknown').toString().split(',')[0];
@@ -30,16 +30,8 @@ export function createHandler({db,queue,mail=defaultMail,publicOrigin=process.en
    }
    if(req.method==='POST'&&url.pathname==='/api/queue/heartbeat'){await read(req);return json(res,200,await queue.heartbeat(token(req)));}
    if(req.method==='POST'&&url.pathname==='/api/queue/action'){const data=await read(req);return json(res,200,await queue.action(token(req),data.action,data));}
-   if(req.method==='POST'&&url.pathname==='/api/queue/email'){
-    if(!mail.signupReady())return json(res,503,{message:'Email fallback is not configured yet. Your web queue still works; no email address was collected.'});
-    const data=await read(req),email=normalizeEmail(data.email);if(!email||data.consent!==true)return json(res,400,{message:'Enter a valid email and agree to critical fallback alerts.'});
-    const reservation=await queue.requestEmail(token(req),email);
-    try{const result=await mail.sendConfirmation(email,mail.privateLink('verify',reservation.token));await queue.finishMail(reservation.id,result.ok?'accepted':'rejected',result.id);return json(res,result.ok?200:502,{message:result.ok?'Check your inbox and confirm fallback email.':'Could not send verification. The web queue remains available.'});}
-    catch{await queue.finishMail(reservation.id,'delivery-unknown');return json(res,502,{message:'Email delivery is uncertain. Check your inbox before requesting another.'});}
-   }
-   if(req.method==='POST'&&url.pathname==='/api/queue/verify-email'){const data=await read(req);return json(res,200,await queue.verifyEmail(data.token));}
-   if(req.method==='POST'&&url.pathname==='/api/queue/exchange'){const data=await read(req);return json(res,200,await queue.exchange(data.token));}
-   if(url.pathname==='/api/subscribe'||url.pathname==='/confirm')return json(res,410,{message:'Join the web queue first. Email is now an optional fallback in your private panel.'});
+   // DEPRECATED: never collect addresses or send email, including with old provider settings.
+   if(['/api/queue/email','/api/queue/verify-email','/api/queue/exchange','/api/subscribe','/confirm'].includes(url.pathname))return json(res,410,{message:'Email fallback has been deprecated. Use browser on-call alerts.'});
    return json(res,404,{message:'Not found.'});
   }catch(error){if(!error.publicMessage)console.error('queue_request_failed');return json(res,error.status||503,{message:error.publicMessage||'Service temporarily unavailable. Please try again.'});}
  };

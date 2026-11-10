@@ -1,11 +1,11 @@
 import { createHash,randomBytes,randomUUID } from 'node:crypto';
-import { validAlias,validPreferences } from '../docs/regions.js';
+import { validAlias,validPreferences,validQuietSchedule,quietAt } from '../docs/regions.js';
 import { readyOnPage,emailEligible,compareQueue,fallbackCapacity,refillCredits,COOLDOWN_MS,DAILY_TOTAL,DAILY_VERIFICATION } from './queue-policy.mjs';
 import { FRESH_MS } from './domain.mjs';
 const hash=token=>createHash('sha256').update(token).digest('hex');
 const secret=()=>randomBytes(32).toString('hex');
 export function problem(message,status=400){return Object.assign(new Error(message),{status,publicMessage:message});}
-export function createQueue({db,now=Date.now}) {
+export function createQueue({db,now=Date.now,onCallSeconds=300}) {
   async function transaction(work){const c=await db.connect();try{await c.query('BEGIN');await c.query('SELECT pg_advisory_xact_lock(74120913)');const out=await work(c);await c.query('COMMIT');return out;}catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}}
   async function session(token,c=db){if(typeof token!=='string'||!/^[a-f0-9]{64}$/.test(token))return null;const r=await c.query('SELECT m.* FROM q_session s JOIN q_member m ON m.id=s.member_id WHERE s.token_hash=$1 AND s.expires_at>$2',[hash(token),now()]);return r.rows[0]??null;}
   async function requireMember(token,c){const m=await session(token,c);if(!m)throw problem('Your private session is missing or expired. Reopen a recovery link or join again.',401);return m;}
@@ -55,7 +55,9 @@ export function createQueue({db,now=Date.now}) {
     }else if(action==='rejoin')await c.query("UPDATE q_member SET state='active',available=false,queue_order=nextval('q_order_seq'),last_seen_at=$1 WHERE id=$2",[now(),member.id]);
     else if(action==='preferences'){
       if(!validPreferences(data.region,data.timezone))throw problem('Choose a listed region and time zone.');
-      await c.query('UPDATE q_member SET region=$1,timezone=$2 WHERE id=$3',[data.region,data.timezone,member.id]);
+      const enabled=data.quietEnabled??member.quiet_enabled,start=data.quietStart??Number(member.quiet_start),end=data.quietEnd??Number(member.quiet_end);
+      if(!validQuietSchedule(enabled,start,end))throw problem('Choose different quiet-hour start and end times.');
+      await c.query('UPDATE q_member SET region=$1,timezone=$2,quiet_enabled=$3,quiet_start=$4,quiet_end=$5 WHERE id=$6',[data.region,data.timezone,enabled,start,end,member.id]);
     }else if(action==='email-off'){await c.query('UPDATE q_member SET email_consent=false WHERE id=$1',[member.id]);await c.query('DELETE FROM q_email_verify WHERE member_id=$1',[member.id]);}
     else throw problem('Unknown queue action.');
     if(action==='available'&&data.available!==true&&call){await c.query("UPDATE q_call SET status='passed' WHERE id=$1",[call.id]);await moveBack(c,member.id);}
@@ -68,7 +70,7 @@ export function createQueue({db,now=Date.now}) {
     const deadline=Date.parse(observation.campaignEndDate);
     if(!Number.isFinite(deadline))return [];
     if(round&&deadline-Number(round.source_deadline)>30_000){await closeRound(c,round,'reset');round=null;}
-    if(!round&&observation.seconds<300){round={id:randomUUID(),started_at:now(),source_deadline:deadline,fallback_claimed:false};await c.query('INSERT INTO q_round(id,started_at,source_deadline) VALUES($1,$2,$3)',[round.id,round.started_at,deadline]);}
+    if(!round&&observation.seconds<onCallSeconds){round={id:randomUUID(),started_at:now(),source_deadline:deadline,fallback_claimed:false};await c.query('INSERT INTO q_round(id,started_at,source_deadline) VALUES($1,$2,$3)',[round.id,round.started_at,deadline]);}
     if(!round)return [];
     let call=(await c.query("SELECT * FROM q_call WHERE round_id=$1 AND status IN ('offered','acknowledged') ORDER BY offered_at DESC LIMIT 1",[round.id])).rows[0];
     if(call){
@@ -84,7 +86,8 @@ export function createQueue({db,now=Date.now}) {
       const next=all.find(m=>readyOnPage(m,now())&&!touched.has(m.id));
       if(next){call={id:randomUUID(),member_id:next.id,status:'offered',respond_by:now()+15_000};await c.query('INSERT INTO q_call(id,round_id,member_id,offered_at,respond_by) VALUES($1,$2,$3,$4,$5)',[call.id,round.id,next.id,now(),call.respond_by]);await c.query("INSERT INTO q_touch(round_id,member_id,channel) VALUES($1,$2,'page') ON CONFLICT DO NOTHING",[round.id,next.id]);await c.query('UPDATE q_member SET priority_order=NULL WHERE id=$1',[next.id]);touched.add(next.id);}
     }
-    // Fallback is for a red flag nobody has acknowledged, not a routine broadcast.
+    return [];
+    /* DEPRECATED: email is unsuitable for instant on-call alerts. Retained for reference only.
     if(!allowEmail||observation.seconds>=120||round.fallback_claimed||recentCompletion||call?.status==='acknowledged'||now()-Number(round.started_at)<15_000)return [];
     const budget=(await c.query('SELECT * FROM q_budget WHERE id=1')).rows[0];
     const credits=budget?refillCredits(budget.credits,budget.updated_at,now()):10;
@@ -102,19 +105,21 @@ export function createQueue({db,now=Date.now}) {
       result.push({id,roundId:round.id,sourceDeadline:deadline,memberId:member.id,email:member.email,token});
     }
     return result;
+    */
   });}
   async function snapshot(token){
     const [members,rounds,me,usage]=await Promise.all([db.query("SELECT * FROM q_member WHERE state='active'"),db.query("SELECT * FROM q_round WHERE status='active' LIMIT 1"),session(token),mailRows(db)]);
     const round=rounds.rows[0];const calls=round?(await db.query("SELECT * FROM q_call WHERE round_id=$1 AND status IN ('offered','acknowledged') LIMIT 1",[round.id])).rows:[];const call=calls[0];
     const list=members.rows.sort((a,b)=>{
       if(a.id===call?.member_id)return -1;if(b.id===call?.member_id)return 1;return compareQueue(a,b,now());
-    }).map((m,i)=>({id:m.id,alias:m.alias,position:i+1,available:m.available,online:now()-Number(m.last_seen_at)<45_000,ready:readyOnPage(m,now()),cooldownUntil:Number(m.cooldown_until),volunteered:m.priority_order!=null,onCall:m.id===call?.member_id}));
+    }).map((m,i)=>({id:m.id,alias:m.alias,position:i+1,available:m.available,online:now()-Number(m.last_seen_at)<45_000,ready:readyOnPage(m,now()),quiet:quietAt(m,now()),cooldownUntil:Number(m.cooldown_until),volunteered:m.priority_order!=null,onCall:m.id===call?.member_id}));
     const fallback=usage.filter(r=>r.kind==='fallback').length;
     return {rows:list,total:list.length,serverTime:now(),round:round?{id:round.id,startedAt:Number(round.started_at),fallbackSent:round.fallback_claimed}:null,
       call:call?{id:call.id,memberId:call.member_id,status:call.status,respondBy:Number(call.respond_by),actBy:call.act_by==null?null:Number(call.act_by)}:null,
-      me:me?{id:me.id,alias:me.alias,region:me.region,timezone:me.timezone,state:me.state,available:me.available,cooldownUntil:Number(me.cooldown_until),emailVerified:me.email_verified,emailOptIn:me.email_consent}:null,
+      me:me?{id:me.id,alias:me.alias,region:me.region,timezone:me.timezone,state:me.state,available:me.available,cooldownUntil:Number(me.cooldown_until),quietEnabled:me.quiet_enabled,quietStart:Number(me.quiet_start),quietEnd:Number(me.quiet_end),quiet:quietAt(me,now())}:null,
       mailBudget:{totalUsed:usage.length,totalCap:DAILY_TOTAL,fallbackUsed:fallback,fallbackCap:80}};
   }
+  /* DEPRECATED: no email API routes or worker call these legacy helpers.
   async function requestEmail(token,email){return transaction(async c=>{
     const member=await requireMember(token,c);if(member.state!=='active')throw problem('Rejoin the active queue before adding fallback email.');
     const rows=await mailRows(c);if(rows.length>=DAILY_TOTAL||rows.filter(r=>r.kind==='verification').length>=DAILY_VERIFICATION)throw problem('The daily verification email budget is used up. Your web queue still works.',429);
@@ -141,5 +146,6 @@ export function createQueue({db,now=Date.now}) {
     const [member,round,call]=await Promise.all([db.query('SELECT * FROM q_member WHERE id=$1',[reservation.memberId]),db.query("SELECT 1 FROM q_round WHERE id=$1 AND status='active'",[reservation.roundId]),db.query("SELECT 1 FROM q_call WHERE round_id=$1 AND status='acknowledged' LIMIT 1",[reservation.roundId])]);
     return !!round.rows.length&&!call.rows.length&&member.rows.length&&emailEligible(member.rows[0],now());
   }
-  return {join,heartbeat,action,tick,snapshot,requestEmail,verifyEmail,exchange,finishMail,canSend,session};
+  */
+  return {join,heartbeat,action,tick,snapshot,session,onCallSeconds};
 }
