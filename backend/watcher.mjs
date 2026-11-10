@@ -17,7 +17,8 @@ export async function runWatcher() {
       if (!lock.rows[0].acquired) { client.removeListener('error', onError); client.release(); client = null; await delay(5000); continue; }
       browser = await chromium.launch({ headless: true });
       const page = await browser.newPage({ locale: 'en-US' });
-      await page.goto(CAMPAIGN_URL, { waitUntil: 'domcontentloaded', timeout: 45_000 });
+      const navigation = await page.goto(CAMPAIGN_URL, { waitUntil: 'domcontentloaded', timeout: 45_000 });
+      console.log(JSON.stringify({ event: 'gamefound_navigation', httpStatus: navigation?.status(), title: await page.title() }));
       console.log('watcher_browser_started');
       let lastNavigation = Date.now(), lastPersist = 0, lastValid = Date.now(), lastNetworkCheck = 0, originReachable = false;
       while (!stopped && !lostLock) {
