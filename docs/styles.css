@@ -128,3 +128,6 @@ td:last-child{border-right:1px solid var(--border-soft);border-radius:0 7px 7px 
 .next-up{margin:18px 0;padding:22px;border:1px solid var(--accent);border-left:5px solid var(--accent);background:var(--accent-wash);border-radius:7px}.next-up h2{margin:10px 0;color:var(--accent-bright);overflow-wrap:anywhere}.next-up p{margin-bottom:0}
 
 .clock-turn{margin-top:28px;text-align:center}.clock-turn h2{font-size:clamp(24px,3.2vw,36px);line-height:1.2}.alarm-active .clock-turn{border-color:var(--accent-bright);background:var(--own)}.your-turn .clock-turn,.your-turn .alarm-banner strong{animation:your-turn-pulse 1.2s ease-in-out infinite}.your-turn .my-card{box-shadow:0 0 0 2px var(--accent),0 0 65px var(--shadow)}@keyframes your-turn-pulse{0%,100%{opacity:1}50%{opacity:.62}}@media(prefers-reduced-motion:reduce){.your-turn .clock-turn,.your-turn .alarm-banner strong{animation:none}}
+
+/* Fixed setup CTA: red until audio is enabled, regardless of the page theme. */
+#page-alerts{background:#b3263b;color:#fff;border:1px solid #ff8c9d;box-shadow:0 0 0 1px #7b1528}#page-alerts:focus-visible{outline-color:#ffb1be}.alert-setup:has(#page-alerts[hidden]){border:0;background:transparent;padding:0;margin:16px 0}.alert-setup:has(#page-alerts[hidden]) #alerts-help{color:var(--muted);font-size:13px}
