@@ -22,8 +22,9 @@
       return;
     }
     const age = Math.max(0, observation.serverTime - observation.observedAt) + performance.now() - receivedAt;
-    if (age > 10000) { $('clock').textContent = '— — : — —'; $('signal-badge').textContent = 'STALE SIGNAL'; return; }
-    const seconds = Math.max(0, observation.seconds - Math.floor(age / 1000));
+    if (age > (observation.freshnessMs || 15000)) { $('clock').textContent = '— — : — —'; $('signal-badge').textContent = 'STALE SIGNAL'; return; }
+    const seconds = observation.deadlineAt == null ? Math.max(0, observation.seconds - Math.floor(age / 1000))
+      : Math.max(0, Math.ceil((observation.deadlineAt - observation.serverTime - (performance.now() - receivedAt)) / 1000));
     $('clock').textContent = `${String(Math.floor(seconds / 3600)).padStart(2,'0')}:${String(Math.floor(seconds % 3600 / 60)).padStart(2,'0')}:${String(seconds % 60).padStart(2,'0')}`;
     $('signal-badge').textContent = 'LIVE SIGNAL';
     $('clock-caption').textContent = 'HOURS / MINUTES / SECONDS';
@@ -38,7 +39,7 @@
       allowedSignup = data.signupEnabled === true;
       $('subscribe').disabled = !allowedSignup || submitting;
       if (!submitting) $('subscribe').textContent = allowedSignup ? 'Get my near-end alert →' : 'Email signup coming soon';
-      $('signal-status').textContent = data.sourceStatus === 'live' ? '● Server watcher connected to Gamefound' : '● Gamefound timer is unavailable; no alert will trigger';
+      $('signal-status').textContent = data.sourceStatus === 'live' ? '● Synced with Gamefound’s public API' : data.sourceStatus === 'elapsed' ? '● Latest reported deadline has passed; no near-end alert will trigger' : '● Gamefound timer is unavailable; no alert will trigger';
       $('last-observation').textContent = data.observedAt ? 'Last watcher check: ' + new Date(data.observedAt).toLocaleTimeString() : 'No timer observation yet.';
       const delivery = { accepted: 'Mailgun accepted the near-end alert. Inbox delivery is not guaranteed.', rejected: 'Mailgun rejected the alert. Delivery needs attention.', 'delivery-unknown': 'Alert delivery is uncertain. The operator must check Mailgun logs.', sending: 'The near-end alert is being submitted.', 'skipped-expired': 'The alert observation expired before sending. No late alert was sent.' };
       $('delivery-status').textContent = delivery[data.alertStatus] || (data.alertsEnabled ? 'Near-end alerts are enabled. One alert per campaign.' : 'Alert delivery is not enabled yet.');

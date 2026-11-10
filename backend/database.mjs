@@ -14,6 +14,9 @@ export async function migrate() {
       campaign_id TEXT PRIMARY KEY, status TEXT NOT NULL, observed_seconds INTEGER NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(), provider_id TEXT
     )`);
+    await client.query('ALTER TABLE watch_observation ADD COLUMN IF NOT EXISTS deadline_at BIGINT');
+    await client.query('ALTER TABLE watch_observation ADD COLUMN IF NOT EXISTS campaign_end_date TEXT');
+    await client.query('ALTER TABLE watch_observation ADD COLUMN IF NOT EXISTS source TEXT');
     await client.query(`CREATE TABLE IF NOT EXISTS watch_confirmation (
       token_hash TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, consent_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       expires_at TIMESTAMPTZ NOT NULL, state TEXT NOT NULL DEFAULT 'pending'
