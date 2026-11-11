@@ -2,6 +2,7 @@ import { createHash,randomBytes,randomUUID } from 'node:crypto';
 import { validAlias,validPreferences,validQuietSchedule,quietAt } from '../docs/regions.js';
 import { readyOnPage,isWatching,compareQueue,WATCH_MS,RENEW_MS,PRESENCE_MS } from './queue-policy.mjs';
 import { FRESH_MS } from './domain.mjs';
+const MAX_WATCHERS = 20;
 const RESPONSE_MS = 15_000;
 const hash=token=>createHash('sha256').update(token).digest('hex');
 const secret=()=>randomBytes(32).toString('hex');
@@ -28,7 +29,10 @@ export function createQueue({db,now=Date.now,onCallSeconds=300}) {
     await expireWatchers(c);const member=await requireMember(token,c);if(member.state!=='active')throw problem('This queue entry is no longer active.');await trackPresence(c,member.id,data.tabId);
     if(action==='available'){
       if(data.available===true){
-        if(!isWatching(member,now())){await c.query("DELETE FROM q_touch WHERE member_id=$1 AND round_id IN (SELECT id FROM q_round WHERE status='active')",[member.id]);await c.query("UPDATE q_member SET available=true,watch_until=$1,last_seen_at=$2,watch_reason=NULL,cooldown_until=0,priority_order=NULL,queue_order=nextval('q_order_seq') WHERE id=$3",[now()+WATCH_MS,now(),member.id]);}
+        if(!isWatching(member,now())){
+          const {rows:[{count}]}=await c.query("SELECT count(*)::int AS count FROM q_member WHERE state='active' AND available=true");
+          if(count>=MAX_WATCHERS)throw problem('All '+MAX_WATCHERS+' watch spots are full. Try again when a spot opens.',409);
+          await c.query("DELETE FROM q_touch WHERE member_id=$1 AND round_id IN (SELECT id FROM q_round WHERE status='active')",[member.id]);await c.query("UPDATE q_member SET available=true,watch_until=$1,last_seen_at=$2,watch_reason=NULL,cooldown_until=0,priority_order=NULL,queue_order=nextval('q_order_seq') WHERE id=$3",[now()+WATCH_MS,now(),member.id]);}
       }else await stopWatching(c,member.id);
     }else if(action==='renew'){
       if(!isWatching(member,now()))throw problem('Your renewal window ended. Press Start watching to rejoin.');
@@ -67,12 +71,15 @@ export function createQueue({db,now=Date.now,onCallSeconds=300}) {
     // Email fallback is deprecated: no reservations or outbound delivery.
     return [];
   });}
+  function memberView(me){
+    return me?{id:me.id,alias:me.alias,region:me.region,timezone:me.timezone,state:me.state,available:isWatching(me,now()),watchUntil:Number(me.watch_until),renewBy:Number(me.watch_until)+RENEW_MS,renewalDue:isWatching(me,now())&&Number(me.watch_until)<=now(),watchReason:me.watch_reason,cooldownUntil:0,quietEnabled:me.quiet_enabled,quietStart:Number(me.quiet_start),quietEnd:Number(me.quiet_end),quiet:false}:null;
+  }
   async function snapshot(token){
     await transaction(expireWatchers);const [members,rounds,me]=await Promise.all([db.query("SELECT * FROM q_member WHERE state='active'"),db.query("SELECT * FROM q_round WHERE status='active' LIMIT 1"),session(token)]);const round=rounds.rows[0];const call=round?(await db.query("SELECT * FROM q_call WHERE round_id=$1 AND status IN ('offered','acknowledged') ORDER BY offered_at,id LIMIT 1",[round.id])).rows[0]:null;
     const list=members.rows.sort((a,b)=>compareQueue(a,b,now())).map((m,i)=>({id:m.id,alias:m.alias,position:i+1,available:isWatching(m,now()),online:now()-Number(m.last_seen_at)<PRESENCE_MS,ready:readyOnPage(m,now()),quiet:false,cooldownUntil:0,volunteered:false,onCall:isWatching(m,now()),watchUntil:Number(m.watch_until),renewBy:Number(m.watch_until)+RENEW_MS,renewalDue:isWatching(m,now())&&Number(m.watch_until)<=now(),alertStatus:m.id===call?.member_id?call.status:null}));
     const touched=round?new Set((await db.query('SELECT member_id FROM q_touch WHERE round_id=$1',[round.id])).rows.map(m=>m.member_id)):new Set();const next=call?list.find(m=>m.id===call.member_id):list.find(m=>m.ready&&!touched.has(m.id));const missed=round?(await db.query("SELECT m.alias,c.respond_by,c.act_by,c.offered_at FROM q_call c JOIN q_member m ON m.id=c.member_id WHERE c.round_id=$1 AND c.status='expired' ORDER BY c.offered_at DESC LIMIT 1",[round.id])).rows[0]:null;
     const ordered=(call?[list.find(m=>m.id===call.member_id),...list.filter(m=>m.ready&&m.id!==call.member_id&&!touched.has(m.id))]:list.filter(m=>m.ready&&!touched.has(m.id))).filter(Boolean).slice(0,3).map((m,i)=>({memberId:m.id,alias:m.alias,position:i+1,status:i===0&&call?call.status:'next'}));
-    return {upgradeOrder:ordered,lastMissed:missed?{alias:missed.alias,at:Number(missed.act_by||missed.respond_by)}:null,nextUp:next?{memberId:next.id,alias:next.alias,status:call?.status||'next'}:null,rows:list,total:list.length,watchingCount:list.filter(m=>m.onCall).length,maxWatchers:null,shiftMs:WATCH_MS,renewalMs:RENEW_MS,serverTime:now(),round:round?{id:round.id,startedAt:Number(round.started_at),sourceDeadline:Number(round.source_deadline)}:null,call:call?{id:call.id,memberId:call.member_id,status:call.status,respondBy:Number(call.respond_by),actBy:call.act_by==null?null:Number(call.act_by)}:null,me:me?{id:me.id,alias:me.alias,region:me.region,timezone:me.timezone,state:me.state,available:isWatching(me,now()),watchUntil:Number(me.watch_until),renewBy:Number(me.watch_until)+RENEW_MS,renewalDue:isWatching(me,now())&&Number(me.watch_until)<=now(),watchReason:me.watch_reason,cooldownUntil:0,quietEnabled:me.quiet_enabled,quietStart:Number(me.quiet_start),quietEnd:Number(me.quiet_end),quiet:false}:null};
+    return {upgradeOrder:ordered,lastMissed:missed?{alias:missed.alias,at:Number(missed.act_by||missed.respond_by)}:null,nextUp:next?{memberId:next.id,alias:next.alias,status:call?.status||'next'}:null,rows:list,total:list.length,watchingCount:list.filter(m=>m.onCall).length,maxWatchers:MAX_WATCHERS,shiftMs:WATCH_MS,renewalMs:RENEW_MS,serverTime:now(),round:round?{id:round.id,startedAt:Number(round.started_at),sourceDeadline:Number(round.source_deadline)}:null,call:call?{id:call.id,memberId:call.member_id,status:call.status,respondBy:Number(call.respond_by),actBy:call.act_by==null?null:Number(call.act_by)}:null,me:memberView(me)};
   }
-  return {join,heartbeat,disconnect,action,tick,snapshot,session,onCallSeconds};
+  return {join,heartbeat,disconnect,action,tick,snapshot,session,memberView,onCallSeconds};
 }

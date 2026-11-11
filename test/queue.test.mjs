@@ -1,6 +1,7 @@
 import test,{before,after,beforeEach} from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import {gunzipSync} from 'node:zlib';
 import {testDatabase} from './database-helper.mjs';
 import {migrate} from '../backend/database.mjs';
 import {createQueue} from '../backend/queue.mjs';
@@ -17,7 +18,23 @@ test('aliases are case-insensitively unique; public snapshots reveal no credenti
 test('HTTP requires origin and a private token for mutations; deprecated email is rejected',async()=>{const server=http.createServer(createHandler({db,queue:q,production:true,publicOrigin:'https://example.test',mail:{signupReady:()=>false,alertReady:()=>false}}));await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));try{const base='http://127.0.0.1:'+server.address().port;const denied=await fetch(base+'/api/queue/join',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({alias:'HTTP Member',region:'europe',timezone:'Europe/London',consent:true})});assert.equal(denied.status,403);const headers={Origin:'https://example.test','Content-Type':'application/json'};const joined=await fetch(base+'/api/queue/join',{method:'POST',headers,body:JSON.stringify({alias:'HTTP Member',region:'europe',timezone:'Europe/London',consent:true})});assert.equal(joined.status,201);const data=await joined.json();const unauthorized=await fetch(base+'/api/queue/action',{method:'POST',headers,body:JSON.stringify({action:'complete'})});assert.equal(unauthorized.status,401);const email=await fetch(base+'/api/queue/email',{method:'POST',headers:{...headers,Authorization:'Bearer '+data.token},body:JSON.stringify({email:'person@example.invalid',consent:true})});assert.equal(email.status,410);assert.equal((await db.query('SELECT * FROM q_email_verify')).rows.length,0);const pub=await(await fetch(base+'/api/queue')).json();assert.equal(pub.me,null);assert.equal(pub.rows[0].alias,'HTTP Member');}finally{await new Promise(resolve=>server.close(resolve));}});
 
 test('new participants are not watching; joining a shift moves them ahead of waiting entries',async()=>{const waiting=await q.join({alias:'Waiting Scout',region:'europe',timezone:'Europe/London'});assert.equal((await q.snapshot(waiting.token)).me.available,false);const a=await member('Active Scout');const view=await q.snapshot(a.token);assert.equal(view.rows[0].id,a.id);assert.equal(view.watchingCount,1);assert.equal(view.rows[0].onCall,true);assert.equal(view.me.watchUntil,time+1800000);});
-test('watch group has no five-person limit, even under concurrent starts',async()=>{const members=[];for(let i=0;i<12;i++)members.push(await q.join({alias:'Watcher '+i}));await Promise.all(members.map(m=>q.action(m.token,'available',{available:true})));const view=await q.snapshot();assert.equal(view.watchingCount,12);assert.equal(view.maxWatchers,null);assert.equal(view.rows.filter(m=>m.onCall).length,12);});
+test('concurrent starts cap the watch at twenty and stopping opens a spot',async()=>{
+ const members=[];
+ for(let i=0;i<22;i++)members.push(await q.join({alias:'Watcher '+i}));
+ const starts=await Promise.allSettled(members.map(m=>q.action(m.token,'available',{available:true})));
+ const view=await q.snapshot();
+ assert.equal(view.watchingCount,20);
+ assert.equal(view.maxWatchers,20);
+ assert.equal(view.total,22);
+ assert.equal(starts.filter(result=>result.status==='fulfilled').length,20);
+ for(const result of starts.filter(result=>result.status==='rejected'))assert.equal(result.reason.status,409);
+ const active=members[starts.findIndex(result=>result.status==='fulfilled')];
+ const waiting=members[starts.findIndex(result=>result.status==='rejected')];
+ await q.action(active.token,'available',{available:false});
+ await q.action(waiting.token,'available',{available:true});
+ assert.equal((await q.snapshot(waiting.token)).me.available,true);
+ assert.equal((await q.snapshot()).watchingCount,20);
+});
 test('one watcher at a time receives fifteen seconds; silence times out into Not watching and cascades',async()=>{const a=await member('First Watcher'),b=await member('Second Watcher');await q.tick(observation(300));assert.equal((await q.snapshot(a.token)).call,null);await Promise.all([q.tick(observation(299)),q.tick(observation(299))]);assert.equal((await q.snapshot()).call.memberId,a.id);assert.equal((await q.snapshot()).call.respondBy,time+15000);assert.equal((await db.query('SELECT * FROM q_call')).rows.length,1);await advance(14999,[a,b]);await q.tick(observation(290));assert.equal((await q.snapshot()).call.memberId,a.id);await advance(1,[a,b]);await q.tick(observation(289));assert.equal((await q.snapshot()).call.memberId,b.id);assert.equal((await q.snapshot(a.token)).me.available,false);assert.equal((await q.snapshot()).watchingCount,1);});
 test('thirty-minute shifts prompt a sixty-second renewal rather than ending immediately',async()=>{const a=await member();const end=(await q.snapshot(a.token)).me.watchUntil;await advance(30000,[a]);await q.action(a.token,'available',{available:true});assert.equal((await q.snapshot(a.token)).me.watchUntil,end);await advance(end-time,[a]);let view=await q.snapshot(a.token);assert.equal(view.me.available,true);assert.equal(view.me.renewalDue,true);assert.equal(view.me.renewBy,end+60000);assert.equal(view.rows[0].ready,false);await advance(end+59999-time,[a]);await q.action(a.token,'renew');view=await q.snapshot(a.token);assert.equal(view.me.available,true);assert.equal(view.me.watchUntil,time+1800000);assert.equal(view.me.renewalDue,false);const renewed=view.me.watchUntil;await q.action(a.token,'renew');assert.equal((await q.snapshot(a.token)).me.watchUntil,renewed);});
 test('a missed sixty-second renewal returns to passive status with a reason and supports rejoining',async()=>{const a=await member();time+=1860000;await q.heartbeat(a.token);let view=await q.snapshot(a.token);assert.equal(view.me.available,false);assert.equal(view.me.watchReason,'renewal-missed');assert.equal(view.total,1);await assert.rejects(q.action(a.token,'renew'),/renewal window/);await q.action(a.token,'available',{available:true});view=await q.snapshot(a.token);assert.equal(view.me.available,true);assert.equal(view.me.watchReason,null);});
@@ -55,3 +72,34 @@ test('closing tabs does not authenticate by alias or affect another participant'
 test('page-close endpoint accepts a safelisted beacon body and requires the approved origin',async()=>{const a=await q.join({alias:'Beacon Scout'}),tab=crypto.randomUUID();await q.action(a.token,'available',{available:true,tabId:tab});const server=http.createServer(createHandler({db,queue:q,production:true,publicOrigin:'https://example.test'}));await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));try{const url='http://127.0.0.1:'+server.address().port+'/api/queue/disconnect',body=JSON.stringify({token:a.token,tabId:tab});let r=await fetch(url,{method:'POST',headers:{Origin:'https://evil.test','Content-Type':'text/plain;charset=UTF-8'},body});assert.equal(r.status,403);r=await fetch(url,{method:'POST',headers:{Origin:'https://example.test','Content-Type':'text/plain;charset=UTF-8'},body});assert.equal(r.status,200);time+=5000;assert.equal((await q.snapshot(a.token)).me.watchReason,'page-closed');}finally{await new Promise(resolve=>server.close(resolve));}});
 
 test('public upgrade order shows only the first three eligible watchers and follows handoffs',async()=>{const members=[];for(const name of ['Order Alpha','Order Beta','Order Gamma','Order Delta'])members.push(await member(name));let view=await q.snapshot();assert.deepEqual(view.upgradeOrder.map(m=>m.alias),['Order Alpha','Order Beta','Order Gamma']);await q.tick(observation(299));view=await q.snapshot();assert.equal(view.upgradeOrder[0].status,'offered');assert.equal(view.upgradeOrder.filter(m=>m.memberId===members[0].id).length,1);await q.action(members[0].token,'pass');await q.tick(observation(298));view=await q.snapshot();assert.deepEqual(view.upgradeOrder.map(m=>m.alias),['Order Beta','Order Gamma','Order Delta']);assert.equal(view.upgradeOrder[0].position,1);});
+
+test('live polling sends private watcher state separately from the cacheable compressed roster',async()=>{
+ const a=await member('Fast Watcher'),b=await member('Backup Watcher');
+ await q.tick(observation(299));
+ const handler=createHandler({db,queue:q});
+ async function request(url,headers={}){
+  const response={headers:{}};
+  await handler({method:'GET',url,headers},{
+   setHeader(name,value){response.headers[name.toLowerCase()]=value;},
+   writeHead(status){response.status=status;},
+   end(body){response.body=body;}
+  });
+  return response;
+ }
+ const poll=async token=>JSON.parse((await request('/api/live',token?{authorization:'Bearer '+token}:{})).body);
+ const [first,second,guest]=await Promise.all([poll(a.token),poll(b.token),poll()]);
+ assert.equal(first.call.memberId,a.id);
+ assert.equal(first.call.respondBy-time,15000);
+ assert.equal(first.me.id,a.id);
+ assert.equal(second.me.id,b.id);
+ assert.equal(guest.me,null);
+ assert.equal(first.rows,undefined);
+ assert.equal(first.maxWatchers,20);
+ assert.equal(guest.myRow,undefined);
+ const roster=await request('/api/roster',{'accept-encoding':'gzip'});
+ assert.equal(roster.headers['content-encoding'],'gzip');
+ assert.deepEqual(JSON.parse(gunzipSync(roster.body)).rows.map(row=>row.alias),['Fast Watcher','Backup Watcher']);
+ const unchanged=await request('/api/roster',{'accept-encoding':'gzip','if-none-match':roster.headers.etag});
+ assert.equal(unchanged.status,304);
+ assert.equal(unchanged.body,undefined);
+});
