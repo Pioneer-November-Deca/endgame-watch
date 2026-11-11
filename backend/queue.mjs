@@ -1,13 +1,14 @@
 import { createHash,randomBytes,randomUUID } from 'node:crypto';
 import { validAlias,validPreferences,validQuietSchedule,quietAt } from '../docs/regions.js';
 import { readyOnPage,isWatching,compareQueue,WATCH_MS,RENEW_MS,PRESENCE_MS } from './queue-policy.mjs';
+import { FIRST_ALERT_SECONDS, FAILSAFE_MS } from '../docs/alarm-policy.js';
 import { FRESH_MS } from './domain.mjs';
 const MAX_WATCHERS = 20;
 const RESPONSE_MS = 15_000;
 const hash=token=>createHash('sha256').update(token).digest('hex');
 const secret=()=>randomBytes(32).toString('hex');
 export function problem(message,status=400){return Object.assign(new Error(message),{status,publicMessage:message});}
-export function createQueue({db,now=Date.now,onCallSeconds=300}) {
+export function createQueue({db,now=Date.now,onCallSeconds=FIRST_ALERT_SECONDS}) {
   async function transaction(work){const c=await db.connect();try{await c.query('BEGIN');await c.query('SELECT pg_advisory_xact_lock(74120913)');const out=await work(c);await c.query('COMMIT');return out;}catch(e){await c.query('ROLLBACK');throw e;}finally{c.release();}}
   async function session(token,c=db){if(typeof token!=='string'||!/^[a-f0-9]{64}$/.test(token))return null;const r=await c.query('SELECT m.* FROM q_session s JOIN q_member m ON m.id=s.member_id WHERE s.token_hash=$1 AND s.expires_at>$2',[hash(token),now()]);return r.rows[0]??null;}
   async function requireMember(token,c){const m=await session(token,c);if(!m)throw problem('Your private session is missing or expired. Join again.',401);return m;}
@@ -54,8 +55,13 @@ export function createQueue({db,now=Date.now,onCallSeconds=300}) {
   async function tick(observation){return transaction(async c=>{
     await expireWatchers(c);let round=(await c.query("SELECT * FROM q_round WHERE status='active' LIMIT 1")).rows[0];const fresh=observation?.sourceStatus==='live'&&now()>=observation.observedAt&&now()-observation.observedAt<=FRESH_MS&&observation.deadlineAt>now();if(!fresh){if(observation?.sourceStatus==='elapsed'&&round)await closeRound(c,round,'elapsed');else if(round){const calls=(await c.query("SELECT * FROM q_call WHERE round_id=$1 AND status IN ('offered','acknowledged')",[round.id])).rows;for(const call of calls)if((call.status==='offered'?Number(call.respond_by):Number(call.act_by))<=now()){await finishCall(c,call);}}return [];}
     const deadline=Date.parse(observation.campaignEndDate);if(!Number.isFinite(deadline))return [];if(round&&deadline-Number(round.source_deadline)>30_000){await closeRound(c,round,'reset');round=null;}
-    if(!round&&observation.seconds<onCallSeconds){round={id:randomUUID(),started_at:now(),source_deadline:deadline};await c.query('INSERT INTO q_round(id,started_at,source_deadline) VALUES($1,$2,$3)',[round.id,now(),deadline]);}if(!round)return [];
-    // Serial cascade: one offer, ten seconds to react, then a single thirty-second upgrade buffer.
+    if(!round&&observation.deadlineAt-now()<=onCallSeconds*1000){round={id:randomUUID(),started_at:now(),source_deadline:deadline};await c.query('INSERT INTO q_round(id,started_at,source_deadline) VALUES($1,$2,$3)',[round.id,now(),deadline]);}if(!round)return [];
+    if (observation.deadlineAt - now() <= FAILSAFE_MS) {
+      // The browser alerts all active watchers in the final stretch.
+      await c.query("UPDATE q_call SET status='superseded' WHERE round_id=$1 AND status IN ('offered','acknowledged')", [round.id]);
+      return [];
+    }
+    // Serial cascade: one offer, fifteen seconds to react, then a thirty-second upgrade buffer.
     let call=(await c.query("SELECT * FROM q_call WHERE round_id=$1 AND status IN ('offered','acknowledged') ORDER BY offered_at,id",[round.id])).rows;
     // Compatibility with the previous broadcast version: retire any extra active offers.
     for(const extra of call.slice(1))await c.query("UPDATE q_call SET status='superseded' WHERE id=$1",[extra.id]);
