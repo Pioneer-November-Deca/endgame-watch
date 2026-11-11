@@ -1,0 +1,3 @@
+import test from 'node:test';import assert from 'node:assert/strict';import {sessionFromHash} from '../docs/session-route.js';
+test('private links identify the requested session independently of any saved cookie',()=>{const requested='a'.repeat(64),saved='b'.repeat(64);assert.equal(sessionFromHash('#/Test%20Alias?session='+requested),requested);assert.notEqual(sessionFromHash('#/Test%20Alias?session='+requested),saved);assert.equal(sessionFromHash('#session='+requested),requested);});
+test('public aliases and malformed links cannot authenticate a session',()=>{for(const hash of ['#/Test%20Alias','#/Test?session=short','#/Test?session='+ 'g'.repeat(64),''])assert.equal(sessionFromHash(hash),null);});

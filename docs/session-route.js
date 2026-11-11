@@ -1,0 +1,1 @@
+export function sessionFromHash(hash){const params=new URLSearchParams(hash.includes('?')?hash.slice(hash.indexOf('?')+1):hash.replace(/^#/,''));const token=params.get('session');return /^[a-f0-9]{64}$/.test(token||'')?token:null;}
