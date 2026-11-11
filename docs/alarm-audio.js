@@ -7,11 +7,11 @@ export function createAlarmSound(){
   if(key!==id||context!==audio){stop();key=id;context=audio;}
   const start=audio.currentTime;if(start<nextAt)return;
   const end=start+remainingMs/1000;
-  for(const offset of [0,.18,.36]){
-   const at=start+offset,until=Math.min(at+.11,end);if(until-at<.025)continue;
-   const tone=audio.createOscillator(),gain=audio.createGain();tone.frequency.value=880;gain.gain.setValueAtTime(0,at);gain.gain.linearRampToValueAtTime(.12,at+.008);gain.gain.setValueAtTime(.12,Math.max(at+.008,until-.015));gain.gain.linearRampToValueAtTime(0,until);tone.connect(gain);gain.connect(audio.destination);nodes.add(tone);tone.onended=()=>{nodes.delete(tone);tone.disconnect();gain.disconnect();};tone.start(at);tone.stop(until);
+  for(const offset of [0,.28,.56]){
+   const at=start+offset,until=Math.min(at+.16,end);if(until-at<.025)continue;
+   const tone=audio.createOscillator(),gain=audio.createGain();tone.type='square';tone.frequency.value=1200;gain.gain.setValueAtTime(0,at);gain.gain.linearRampToValueAtTime(.075,at+.008);gain.gain.setValueAtTime(.075,Math.max(at+.008,until-.015));gain.gain.linearRampToValueAtTime(0,until);tone.connect(gain);gain.connect(audio.destination);nodes.add(tone);tone.onended=()=>{nodes.delete(tone);tone.disconnect();gain.disconnect();};tone.start(at);tone.stop(until);
   }
-  nextAt=start+1.7;
+  nextAt=start+2;
  }
  return {sync,stop};
 }
