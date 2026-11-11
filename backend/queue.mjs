@@ -2,6 +2,7 @@ import { createHash,randomBytes,randomUUID } from 'node:crypto';
 import { validAlias,validPreferences,validQuietSchedule,quietAt } from '../docs/regions.js';
 import { readyOnPage,isWatching,compareQueue,WATCH_MS,RENEW_MS,PRESENCE_MS } from './queue-policy.mjs';
 import { FRESH_MS } from './domain.mjs';
+const RESPONSE_MS = 15_000;
 const hash=token=>createHash('sha256').update(token).digest('hex');
 const secret=()=>randomBytes(32).toString('hex');
 export function problem(message,status=400){return Object.assign(new Error(message),{status,publicMessage:message});}
@@ -37,7 +38,7 @@ export function createQueue({db,now=Date.now,onCallSeconds=300}) {
       if(!isWatching(member,now()))throw problem('Start watching before acknowledging an alarm.');
       const signal=(await c.query('SELECT source_status,observed_at,deadline_at,campaign_end_date FROM watch_observation LIMIT 1')).rows[0];if(!signal||signal.source_status!=='live'||now()-Number(signal.observed_at)>FRESH_MS||Number(signal.deadline_at)<=now())throw problem('A fresh live campaign signal is required.');
       const call=(await c.query("SELECT c.*,r.source_deadline FROM q_call c JOIN q_round r ON r.id=c.round_id WHERE c.member_id=$1 AND c.status IN ('offered','acknowledged') AND r.status='active' LIMIT 1",[member.id])).rows[0];
-      if(!call||call.status!=='offered'||Number(call.respond_by)<=now())throw problem('The 10-second response window has ended. The next watcher will be alerted.');
+      if(!call||call.status!=='offered'||Number(call.respond_by)<=now())throw problem('The 15-second response window has ended. The next watcher will be alerted.');
       if(Number(signal.deadline_at)>now()+onCallSeconds*1000||Date.parse(signal.campaign_end_date)-Number(call.source_deadline)>30000)throw problem('The campaign clock changed. Wait for the live queue to update.');
       await c.query("UPDATE q_call SET status='acknowledged',act_by=$1 WHERE id=$2",[Math.min(now()+30_000,Number(signal.deadline_at)),call.id]);
     }else if(action==='complete'||action==='leave'){
@@ -55,14 +56,14 @@ export function createQueue({db,now=Date.now,onCallSeconds=300}) {
     // Compatibility with the previous broadcast version: retire any extra active offers.
     for(const extra of call.slice(1))await c.query("UPDATE q_call SET status='superseded' WHERE id=$1",[extra.id]);
     call=call[0];
-    if(call&&call.status==='offered'&&Number(call.respond_by)>Number(call.offered_at)+10000){call.respond_by=Number(call.offered_at)+10000;await c.query('UPDATE q_call SET respond_by=$1 WHERE id=$2',[call.respond_by,call.id]);}
+    if(call&&call.status==='offered'&&Number(call.respond_by)>Number(call.offered_at)+RESPONSE_MS){call.respond_by=Number(call.offered_at)+RESPONSE_MS;await c.query('UPDATE q_call SET respond_by=$1 WHERE id=$2',[call.respond_by,call.id]);}
     if(call){const expired=call.status==='offered'?Number(call.respond_by)<=now():!call.act_by||Number(call.act_by)<=now();if(expired){await finishCall(c,call);call=null;}}
     if(call)return [];
     if((await c.query("SELECT 1 FROM q_call WHERE round_id=$1 AND status='completed' AND act_by>$2 LIMIT 1",[round.id,now()])).rows.length)return [];
     const touched=new Set((await c.query('SELECT member_id FROM q_touch WHERE round_id=$1',[round.id])).rows.map(m=>m.member_id));
     const watchers=(await c.query("SELECT * FROM q_member WHERE state='active' AND available=true")).rows.filter(m=>readyOnPage(m,now())).sort((a,b)=>compareQueue(a,b,now()));
     const next=watchers.find(m=>!touched.has(m.id));
-    if(next){await c.query("INSERT INTO q_call(id,round_id,member_id,offered_at,respond_by) VALUES($1,$2,$3,$4,$5) ON CONFLICT(round_id,member_id) DO UPDATE SET id=EXCLUDED.id,status='offered',offered_at=EXCLUDED.offered_at,respond_by=EXCLUDED.respond_by,act_by=NULL",[randomUUID(),round.id,next.id,now(),Math.min(now()+10_000,observation.deadlineAt)]);await c.query("INSERT INTO q_touch(round_id,member_id,channel) VALUES($1,$2,'page') ON CONFLICT DO NOTHING",[round.id,next.id]);}
+    if(next){await c.query("INSERT INTO q_call(id,round_id,member_id,offered_at,respond_by) VALUES($1,$2,$3,$4,$5) ON CONFLICT(round_id,member_id) DO UPDATE SET id=EXCLUDED.id,status='offered',offered_at=EXCLUDED.offered_at,respond_by=EXCLUDED.respond_by,act_by=NULL",[randomUUID(),round.id,next.id,now(),Math.min(now()+RESPONSE_MS,observation.deadlineAt)]);await c.query("INSERT INTO q_touch(round_id,member_id,channel) VALUES($1,$2,'page') ON CONFLICT DO NOTHING",[round.id,next.id]);}
     // Email fallback is deprecated: no reservations or outbound delivery.
     return [];
   });}
